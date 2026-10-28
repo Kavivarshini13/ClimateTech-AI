@@ -2537,93 +2537,351 @@ h2 {
   pointer-events: none;
 }
 
-.flat-map {
+.street-map {
   position: absolute;
   z-index: 2;
   inset: 0;
   overflow: hidden;
   touch-action: none;
   cursor: grab;
-  background:
-    radial-gradient(ellipse at 50% 45%, rgba(16, 62, 77, 0.17), transparent 67%),
-    #02080c;
+  background: #e5e9e3;
 }
 
-.flat-map:active {
+.street-map:active {
   cursor: grabbing;
 }
 
-.flat-map-world {
-  position: absolute;
-  inset: 2% 0 5%;
-  transform-origin: center;
-  transition: transform 90ms linear;
-}
-
-.flat-map-image {
+.street-map-tiles {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
-  opacity: 0.76;
+  overflow: hidden;
+}
+
+.street-map-tile {
+  position: absolute;
+  width: 256px;
+  height: 256px;
+  max-width: none;
+  user-select: none;
   pointer-events: none;
 }
 
-.flat-map-image.unavailable {
-  display: none;
-}
-
-.flat-map-grid {
+.street-map-grid {
   position: absolute;
   inset: 0;
-  border: 1px solid rgba(95, 156, 163, 0.12);
-  background-image:
-    linear-gradient(rgba(69, 153, 163, 0.09) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(69, 153, 163, 0.09) 1px, transparent 1px);
-  background-size: 16.666% 25%;
+  border: 1px solid rgba(16, 38, 42, 0.12);
   pointer-events: none;
 }
 
-.flat-map-marker {
+.street-map-marker {
   position: absolute;
   z-index: 3;
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
   padding: 0;
   transform: translate(-50%, -50%);
-  border: 1px solid rgba(221, 255, 250, 0.78);
+  border: 2px solid #fff;
   border-radius: 50%;
-  background: #43ccb8;
-  box-shadow: 0 0 9px 2px rgba(56, 215, 202, 0.56);
+  background: #24a99b;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.5);
   cursor: pointer;
 }
 
-.flat-map-marker.environment-event,
-.flat-map-marker.earthquake {
-  width: 10px;
-  height: 10px;
-  border-color: #ffd37e;
-  background: #ee8052;
-  box-shadow: 0 0 11px 3px rgba(239, 119, 71, 0.62);
+.street-map-marker.environment-event,
+.street-map-marker.earthquake {
+  border-color: #fff;
+  background: #ed8252;
 }
 
-.flat-map-marker.selected {
-  width: 11px;
-  height: 11px;
-  border-color: #fff0b1;
-  background: #e4bd58;
-  box-shadow: 0 0 15px 4px rgba(220, 183, 76, 0.68);
+.street-map-marker.flood-alert {
+  width: 16px;
+  height: 16px;
+  border-width: 3px;
+  animation: flood-marker-pulse 1.8s ease-out infinite;
 }
 
-.flat-map-caption {
+.street-map-marker.flood-alert.red {
+  background: #d93838;
+  box-shadow: 0 0 0 5px rgba(217, 56, 56, 0.3);
+}
+
+.street-map-marker.flood-alert.orange {
+  background: #ed8c20;
+  box-shadow: 0 0 0 5px rgba(237, 140, 32, 0.28);
+}
+
+.street-map-marker.flood-alert.green {
+  background: #42965a;
+  box-shadow: 0 0 0 4px rgba(66, 150, 90, 0.25);
+}
+
+.street-map-marker.selected {
+  z-index: 5;
+  width: 18px;
+  height: 18px;
+  border: 3px solid #fff;
+  background: #2778d0;
+  box-shadow: 0 0 0 5px rgba(39, 120, 208, 0.32), 0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.street-map-weather {
   position: absolute;
-  bottom: 8px;
-  left: 8px;
-  z-index: 4;
-  color: #8da4a1;
-  font-size: 7px;
-  letter-spacing: 1px;
+  z-index: 6;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  border-radius: 8px;
+  background: rgba(8, 24, 31, 0.88);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.24);
+  color: #f0f7f5;
+  pointer-events: none;
+}
+
+.street-map-weather-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.street-map-weather strong,
+.street-map-weather small {
+  display: block;
+}
+
+.street-map-weather strong {
+  font-size: 14px;
+}
+
+.street-map-weather small {
+  color: #b7c9c7;
+  font-size: 9px;
+}
+
+.street-map-caption {
+  position: absolute;
+  z-index: 6;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 9px;
+  background: rgba(7, 18, 22, 0.82);
+  color: #d3dddb;
+  font-size: 8px;
+  letter-spacing: 0.45px;
+  pointer-events: none;
+}
+
+.street-map-caption a {
+  color: #d5e6e2;
+  font-size: 9px;
+  letter-spacing: 0;
+  pointer-events: auto;
+  text-decoration: underline;
+}
+
+@keyframes flood-marker-pulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); }
+  50% { transform: translate(-50%, -50%) scale(1.14); }
+}
+
+.flood-alerts,
+.hourly-forecast {
+  margin-top: 11px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+.flood-alerts > .eyebrow,
+.hourly-forecast > .eyebrow {
+  margin-bottom: 6px;
+  font-size: 8px;
+  letter-spacing: 0.7px;
+}
+
+.flood-alert-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  margin-top: 5px;
+  padding: 7px;
+  border: 1px solid rgba(230, 150, 77, 0.2);
+  border-radius: 5px;
+  background: rgba(81, 49, 26, 0.22);
+  color: #d7e1df;
+  font-size: 9px;
+  text-decoration: none;
+}
+
+.flood-alert-row.red {
+  border-color: rgba(226, 86, 86, 0.34);
+  background: rgba(84, 31, 35, 0.35);
+}
+
+.flood-alert-row > span:nth-child(2) {
+  min-width: 0;
+}
+
+.flood-alert-row small {
+  display: block;
+  margin-top: 3px;
+  color: #a4b5b3;
+  font-size: 8px;
+}
+
+.flood-alert-level {
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: #a86117;
+  color: #fff5e3;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.flood-alert-row.red .flood-alert-level {
+  background: #a93636;
+}
+
+.hourly-forecast-list {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.forecast-hourly .hourly-forecast-list {
+  grid-template-columns: repeat(12, minmax(52px, 1fr));
+  padding-bottom: 4px;
+}
+
+.forecast-hourly .hourly-forecast-item {
+  min-width: 52px;
+}
+
+.three-day-forecast {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.three-day-forecast > .eyebrow {
+  margin-bottom: 7px;
+}
+
+.three-day-forecast-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.three-day-forecast-card {
+  display: grid;
+  min-width: 0;
+  justify-items: center;
+  gap: 4px;
+  padding: 10px 6px;
+  border: 1px solid rgba(147, 176, 190, 0.13);
+  border-radius: 7px;
+  background: linear-gradient(145deg, rgba(13, 36, 45, 0.7), rgba(8, 21, 29, 0.78));
+  text-align: center;
+}
+
+.three-day-name {
+  color: #b6d2d3;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.three-day-weather-icon {
+  min-height: 28px;
+  font-size: 23px;
+  line-height: 1.2;
+}
+
+.three-day-condition {
+  min-height: 14px;
+  color: #8fa7ae;
+  font-size: 8px;
+}
+
+.three-day-forecast-card strong {
+  color: #e0eff0;
+  font-size: 13px;
+}
+
+.three-day-forecast-card strong small {
+  color: #91a2ac;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.three-day-rain {
+  color: #83c7df;
+  font-size: 8px;
+}
+
+.three-day-forecast-card time {
+  color: #647d87;
+  font-size: 8px;
+}
+
+.hourly-forecast-item {
+  display: grid;
+  min-width: 42px;
+  justify-items: center;
+  gap: 3px;
+  padding: 7px 3px;
+  border: 1px solid rgba(147, 176, 190, 0.1);
+  border-radius: 5px;
+  background: rgba(8, 24, 31, 0.52);
+}
+
+.hourly-forecast-item time,
+.hourly-forecast-item small {
+  color: #91a2ac;
+  font-size: 8px;
+}
+
+.hourly-forecast-item strong {
+  color: #d9eae8;
+  font-size: 10px;
+}
+
+.hourly-weather-icon {
+  min-height: 17px;
+  font-size: 14px;
+}
+
+@media (max-width: 520px) {
+  .street-map-caption {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 7px;
+  }
+
+  .hourly-forecast-list {
+    grid-template-columns: repeat(6, 48px);
+  }
+
+  .forecast-hourly .hourly-forecast-list {
+    grid-template-columns: repeat(12, 52px);
+  }
+
+  .three-day-forecast-list {
+    gap: 5px;
+  }
+
+  .three-day-forecast-card {
+    padding: 8px 3px;
+  }
 }
 
 .earth-right-rail {

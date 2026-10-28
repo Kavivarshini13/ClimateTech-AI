@@ -134,8 +134,8 @@ async function fetchWeather(latitude, longitude) {
     latitude: String(latitude),
     longitude: String(longitude),
     current: "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,wind_speed_10m,weather_code",
-    hourly: "temperature_2m,precipitation_probability",
-    daily: "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+    hourly: "temperature_2m,precipitation_probability,weather_code",
+    daily: "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
     timezone: "auto",
     forecast_days: "5"
   }).toString();
@@ -402,12 +402,14 @@ app.get("/api/weather", async (req, res) => {
 
     res.json({
       location: getLocationName(req.query, coordinates),
+      timezone: data.timezone || null,
       current: data.current,
       units: data.current_units,
       hourly: {
         time: data.hourly?.time?.slice(0, 12) || [],
         temperature: data.hourly?.temperature_2m?.slice(0, 12) || [],
-        rainChance: data.hourly?.precipitation_probability?.slice(0, 12) || []
+        rainChance: data.hourly?.precipitation_probability?.slice(0, 12) || [],
+        weatherCode: data.hourly?.weather_code?.slice(0, 12) || []
       },
       daily: data.daily,
       dailyUnits: data.daily_units,
@@ -685,6 +687,58 @@ app.get("/api/flood", async (req, res) => {
   } catch (error) {
     console.error("Flood forecast error:", error.message);
     res.status(502).json({ error: "Unable to load modeled river-discharge data right now." });
+  }
+});
+
+app.get("/api/flood-alerts", async (_req, res) => {
+  try {
+    const result = await cachedProviderData("gdacs-flood-alerts", 5 * 60 * 1000, async () => {
+      const response = await fetch("https://www.gdacs.org/xml/rss_24h.xml", {
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!response.ok) throw new Error("GDACS flood feed returned an error");
+      const xml = await response.text();
+      if (!xml.includes("<rss") || !xml.includes("<channel>")) {
+        throw new Error("GDACS flood feed response was invalid");
+      }
+
+      const readTag = (item, tag) =>
+        item.match(new RegExp(`<${tag}>([^<]*)</${tag}>`, "i"))?.[1]?.trim() || "";
+      const alerts = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)]
+        .flatMap(([, item]) => {
+          if (readTag(item, "gdacs:eventtype") !== "FL") return [];
+          const alertLevel = readTag(item, "gdacs:alertlevel");
+          const latitude = Number(readTag(item, "geo:lat"));
+          const longitude = Number(readTag(item, "geo:long"));
+          const id = readTag(item, "gdacs:eventid");
+          if (
+            !["Green", "Orange", "Red"].includes(alertLevel) ||
+            readTag(item, "gdacs:iscurrent").toLowerCase() !== "true" ||
+            !id ||
+            !Number.isFinite(latitude) ||
+            !Number.isFinite(longitude) ||
+            latitude < -90 ||
+            latitude > 90 ||
+            longitude < -180 ||
+            longitude > 180
+          ) return [];
+
+          return [{
+            id,
+            title: readTag(item, "title") || "GDACS flood event",
+            alertLevel,
+            latitude,
+            longitude,
+            updatedAt: readTag(item, "gdacs:datemodified") || readTag(item, "pubDate"),
+            url: `https://www.gdacs.org/report.aspx?eventtype=FL&eventid=${encodeURIComponent(id)}`
+          }];
+        });
+      return { alerts, source: "GDACS", checkedAt: new Date().toISOString() };
+    });
+    res.json(result);
+  } catch (error) {
+    console.error("GDACS flood alerts error:", error.message);
+    res.status(502).json({ error: "Unable to load verified GDACS flood alerts right now." });
   }
 });
 

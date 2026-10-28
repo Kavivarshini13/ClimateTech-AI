@@ -243,6 +243,7 @@ const WEATHER_DESCRIPTIONS = {
 const EarthGlobe = React.memo(function EarthGlobe({
   earthquakes,
   environmentalEvents,
+  floodAlerts,
   selectedLocation,
   selectedWeather,
   selectedAirQuality,
@@ -302,7 +303,7 @@ const EarthGlobe = React.memo(function EarthGlobe({
       .pointLabel("label")
       .onPointClick((point) => {
         if (point.kind === "ambient") return;
-        if (point.kind === "earthquake" || point.kind === "environment-event") {
+        if (point.kind === "earthquake" || point.kind === "environment-event" || point.kind === "flood-alert") {
           onSelectEventRef.current?.(point.eventDetails);
           onSelectRef.current({
             name: point.locationName,
@@ -601,12 +602,35 @@ const EarthGlobe = React.memo(function EarthGlobe({
           }))
       : [];
 
+    const floodMarkers = visibleLayers.includes("Flood risk")
+      ? floodAlerts.map((alert) => ({
+          lat: alert.latitude,
+          lng: alert.longitude,
+          color: alert.alertLevel === "Red" ? "#f05e5e" : alert.alertLevel === "Orange" ? "#f2a13f" : "#7ebd8d",
+          size: alert.alertLevel === "Red" ? 1.05 : 0.85,
+          altitude: 0.04,
+          label: `${alert.alertLevel} GDACS flood alert · ${alert.title}`,
+          kind: "flood-alert",
+          locationName: alert.title,
+          eventDetails: {
+            title: alert.title,
+            type: `${alert.alertLevel} GDACS flood alert`,
+            date: alert.updatedAt,
+            source: "GDACS",
+            latitude: alert.latitude,
+            longitude: alert.longitude,
+            url: alert.url
+          }
+        }))
+      : [];
+
     globeRef.current.pointsData([
       ...(ambientEnabled ? [...AMBIENT_NETWORK_POINTS, ...ORBITAL_PARTICLES] : []),
       ...locations,
       selected,
       ...earthquakeMarkers,
-      ...environmentMarkers
+      ...environmentMarkers,
+      ...floodMarkers
     ]);
     const connectedStations = globalConditions
       .filter((station) =>
@@ -623,6 +647,7 @@ const EarthGlobe = React.memo(function EarthGlobe({
   }, [
     earthquakes,
     environmentalEvents,
+    floodAlerts,
     selectedLocation,
     selectedWeather,
     selectedAirQuality,
@@ -653,11 +678,13 @@ const EarthGlobe = React.memo(function EarthGlobe({
     <div className="earth-view-stack">
       <div className={`globe ${viewMode === "2d" ? "globe-hidden" : ""}`} ref={containerRef} />
       {viewMode === "2d" && (
-        <EquirectangularMap
+        <StreetMap
           environmentalEvents={environmentalEvents}
           earthquakes={earthquakes}
           globalConditions={globalConditions}
+          floodAlerts={floodAlerts}
           selectedLocation={selectedLocation}
+          selectedWeather={selectedWeather}
           visibleLayers={visibleLayers}
           onSelect={onSelect}
           onSelectEvent={onSelectEvent}
@@ -689,38 +716,168 @@ function distanceKm(firstLatitude, firstLongitude, secondLatitude, secondLongitu
   return 6371 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
 }
 
-function EquirectangularMap({
+function findLocationMention(question, locations) {
+  const bengaluru = locations.find((location) =>
+    location?.name?.toLocaleLowerCase() === "bengaluru"
+  );
+  if (bengaluru && /\bbengalure\b/i.test(question)) return bengaluru.name;
+
+  const knownLocation = locations
+    .filter((location) => location?.name)
+    .sort((first, second) => second.name.length - first.name.length)
+    .find((location) =>
+      new RegExp(
+        `(^|[^\\p{L}])${location.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\p{L}])`,
+        "iu"
+      ).test(question)
+    );
+  if (knownLocation) return knownLocation.name;
+
+  const stopWords = "weather|climate|air quality|pollution|environment|conditions|forecast|temperature|rainfall|analysis|like|look|there|what|how|is|are|today|tomorrow|currently|now";
+  const connectorMatch = question.match(/\b(?:in|at|for|near|around|about)\s+(.+)$/i);
+  if (connectorMatch?.[1]) {
+    const candidate = connectorMatch[1]
+      .split(new RegExp(`\\b(?:${stopWords})\\b`, "i"))[0]
+      .replace(/[?!.,].*$/, "")
+      .replace(/^(?:the|a|an)\s+/i, "")
+      .trim();
+    if (candidate && !/^(?:last|next|coming|future|past)\b/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  const simpleQuery = question
+    .trim()
+    .replace(new RegExp(`\\s+(?:${stopWords})\\b.*$`, "i"), "")
+    .replace(/^[\s?!.,]+|[\s?!.,]+$/g, "");
+  const words = simpleQuery.split(/\s+/);
+  const questionWords = /\b(?:what|why|when|where|who|how|can|could|would|should|is|are|the|tell|show|give|analyze|compare|explain)\b/i;
+  return words.length > 0 && words.length <= 4 && !questionWords.test(simpleQuery)
+    ? simpleQuery
+    : null;
+}
+
+function sameLocation(first, second) {
+  return first.latitude === second.latitude && first.longitude === second.longitude;
+}
+
+const MAP_TILE_SIZE = 256;
+
+function projectMapPoint(latitude, longitude, zoom) {
+  const scale = MAP_TILE_SIZE * 2 ** zoom;
+  const clampedLatitude = Math.max(-85.05112878, Math.min(85.05112878, latitude));
+  const sine = Math.sin((clampedLatitude * Math.PI) / 180);
+  return {
+    x: ((longitude + 180) / 360) * scale,
+    y: (0.5 - Math.log((1 + sine) / (1 - sine)) / (4 * Math.PI)) * scale
+  };
+}
+
+function unprojectMapPoint(x, y, zoom) {
+  const scale = MAP_TILE_SIZE * 2 ** zoom;
+  return {
+    latitude: (Math.atan(Math.sinh(Math.PI - (2 * Math.PI * y) / scale)) * 180) / Math.PI,
+    longitude: (x / scale) * 360 - 180
+  };
+}
+
+function weatherIcon(code) {
+  if (code === 0) return "☀️";
+  if ([1, 2].includes(code)) return "⛅";
+  if ([3].includes(code)) return "☁️";
+  if ([45, 48].includes(code)) return "🌫️";
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return "❄️";
+  if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99].includes(code)) return "🌧️";
+  return "·";
+}
+
+function StreetMap({
   environmentalEvents,
   earthquakes,
   globalConditions,
+  floodAlerts,
   selectedLocation,
+  selectedWeather,
   visibleLayers,
   onSelect,
   onSelectEvent,
   onZoomControls
 }) {
-  const [image, setImage] = useState(nasaImageryUrl("satellite", yesterdayUtc()));
-  const [zoom, setZoom] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [center, setCenter] = useState(selectedLocation);
+  const [zoom, setZoom] = useState(11);
+  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
+  const mapRef = useRef(null);
   const dragRef = useRef(null);
   const zoomControlsRef = useRef(onZoomControls);
+  const selectedLocationRef = useRef(selectedLocation);
 
   useEffect(() => {
     zoomControlsRef.current = onZoomControls;
   }, [onZoomControls]);
 
   useEffect(() => {
+    selectedLocationRef.current = selectedLocation;
+    setCenter(selectedLocation);
+    setZoom(11);
+  }, [selectedLocation]);
+
+  useEffect(() => {
+    if (!mapRef.current) return undefined;
+    const resize = () => {
+      if (!mapRef.current) return;
+      setMapSize({
+        width: mapRef.current.clientWidth,
+        height: mapRef.current.clientHeight
+      });
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(mapRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
     zoomControlsRef.current({
-      zoomIn: () => setZoom((value) => Math.min(4, value * 1.25)),
-      zoomOut: () => setZoom((value) => Math.max(1, value / 1.25)),
-      reset: () => { setZoom(1); setOffset({ x: 0, y: 0 }); }
+      zoomIn: () => setZoom((value) => Math.min(18, value + 1)),
+      zoomOut: () => setZoom((value) => Math.max(3, value - 1)),
+      reset: () => {
+        setCenter(selectedLocationRef.current);
+        setZoom(11);
+      }
     });
     return () => zoomControlsRef.current(null);
   }, []);
 
+  const centerPixel = projectMapPoint(center.latitude, center.longitude, zoom);
+  const mapLeft = centerPixel.x - mapSize.width / 2;
+  const mapTop = centerPixel.y - mapSize.height / 2;
+  const tileCount = 2 ** zoom;
+  const tiles = [];
+  for (
+    let tileX = Math.floor(mapLeft / MAP_TILE_SIZE);
+    tileX <= Math.floor((mapLeft + mapSize.width) / MAP_TILE_SIZE);
+    tileX += 1
+  ) {
+    for (
+      let tileY = Math.max(0, Math.floor(mapTop / MAP_TILE_SIZE));
+      tileY <= Math.min(tileCount - 1, Math.floor((mapTop + mapSize.height) / MAP_TILE_SIZE));
+      tileY += 1
+    ) {
+      const wrappedX = ((tileX % tileCount) + tileCount) % tileCount;
+      tiles.push({
+        key: `${zoom}-${tileX}-${tileY}`,
+        url: `https://tile.openstreetmap.org/${zoom}/${wrappedX}/${tileY}.png`,
+        left: tileX * MAP_TILE_SIZE - mapLeft,
+        top: tileY * MAP_TILE_SIZE - mapTop
+      });
+    }
+  }
+
   const markers = [
     ...((visibleLayers.includes("Weather") || visibleLayers.includes("Temperature") || visibleLayers.includes("Air quality"))
-      ? globalConditions.map((item) => ({
+      ? globalConditions
+        .filter((item) => !sameLocation(item, selectedLocation))
+        .map((item) => ({
           id: `station-${item.latitude}-${item.longitude}`,
           latitude: item.latitude,
           longitude: item.longitude,
@@ -729,6 +886,22 @@ function EquirectangularMap({
           location: item
         }))
       : []),
+    ...floodAlerts.map((alert) => ({
+          id: `flood-${alert.id}`,
+          latitude: alert.latitude,
+          longitude: alert.longitude,
+          label: `${alert.alertLevel} GDACS flood alert · ${alert.title}`,
+          kind: `flood-alert ${alert.alertLevel.toLowerCase()}`,
+          event: {
+            title: alert.title,
+            type: `${alert.alertLevel} GDACS flood alert`,
+            date: alert.updatedAt,
+            source: "GDACS",
+            latitude: alert.latitude,
+            longitude: alert.longitude,
+            url: alert.url
+          }
+        })),
     ...(visibleLayers.includes("Wildfires") || visibleLayers.includes("Extreme weather")
       ? environmentalEvents.filter((event) => {
           const ids = event.categories.map((category) => category.id.toLowerCase());
@@ -753,65 +926,109 @@ function EquirectangularMap({
       kind: "selected",
       location: selectedLocation
     }
-  ];
+  ].flatMap((marker) => {
+    const point = projectMapPoint(marker.latitude, marker.longitude, zoom);
+    const halfWorld = MAP_TILE_SIZE * tileCount / 2;
+    let x = point.x - centerPixel.x;
+    if (x > halfWorld) x -= MAP_TILE_SIZE * tileCount;
+    if (x < -halfWorld) x += MAP_TILE_SIZE * tileCount;
+    const left = mapSize.width / 2 + x;
+    const top = mapSize.height / 2 + point.y - centerPixel.y;
+    return left < -24 || left > mapSize.width + 24 || top < -24 || top > mapSize.height + 24
+      ? []
+      : [{ ...marker, left, top }];
+  });
 
   return (
     <div
-      className="flat-map"
-      aria-label="Interactive equirectangular climate map"
+      className="street-map"
+      aria-label="Interactive street map with selected-location weather and alerts"
+      ref={mapRef}
       onPointerDown={(event) => {
-        if (event.button === 0) {
-          dragRef.current = { x: event.clientX - offset.x, y: event.clientY - offset.y };
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }
+        if (event.button !== 0 || event.target.closest(".street-map-marker")) return;
+        const pixel = projectMapPoint(center.latitude, center.longitude, zoom);
+        dragRef.current = { x: event.clientX, y: event.clientY, pixel };
+        event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event) => {
-        if (dragRef.current) setOffset({ x: event.clientX - dragRef.current.x, y: event.clientY - dragRef.current.y });
+        if (!dragRef.current) return;
+        const { pixel, x, y } = dragRef.current;
+        setCenter(unprojectMapPoint(
+          pixel.x - (event.clientX - x),
+          pixel.y - (event.clientY - y),
+          zoom
+        ));
       }}
-      onPointerUp={() => { dragRef.current = null; }}
+      onPointerUp={(event) => {
+        const drag = dragRef.current;
+        dragRef.current = null;
+        if (!drag || Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 5) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const coordinates = unprojectMapPoint(
+          drag.pixel.x - mapSize.width / 2 + event.clientX - bounds.left,
+          drag.pixel.y - mapSize.height / 2 + event.clientY - bounds.top,
+          zoom
+        );
+        onSelect({
+          name: `Map point ${coordinates.latitude.toFixed(3)}, ${coordinates.longitude.toFixed(3)}`,
+          country: "",
+          ...coordinates
+        });
+      }}
       onPointerCancel={() => { dragRef.current = null; }}
       onWheel={(event) => {
         event.preventDefault();
-        setZoom((value) => Math.max(1, Math.min(4, value * (event.deltaY < 0 ? 1.12 : 0.89))));
+        setZoom((value) => Math.max(3, Math.min(18, value + (event.deltaY < 0 ? 1 : -1))));
       }}
     >
-      <div className="flat-map-world" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }}>
-        <img
-          className="flat-map-image"
-          src={image}
-          alt="NASA global satellite imagery"
-          onError={() => {
-            if (image !== EARTH_FALLBACK_TEXTURE) setImage(EARTH_FALLBACK_TEXTURE);
-            else event.currentTarget.classList.add("unavailable");
-          }}
-        />
-        <div className="flat-map-grid" aria-hidden="true" />
-        {markers.map((marker) => (
-          <button
-            className={`flat-map-marker ${marker.kind}`}
-            type="button"
-            key={marker.id}
-            style={{ left: `${(marker.longitude + 180) / 360 * 100}%`, top: `${(90 - marker.latitude) / 180 * 100}%` }}
-            title={marker.label}
-            aria-label={marker.label}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => {
-              if (marker.event) onSelectEvent(marker.event);
-              else if (marker.quake) onSelectEvent({
-                title: marker.label,
-                type: "Earthquake",
-                date: marker.quake.time ? new Date(marker.quake.time).toISOString() : null,
-                source: "USGS",
-                magnitude: marker.quake.magnitude,
-                latitude: marker.latitude,
-                longitude: marker.longitude
-              });
-              onSelect(marker.location || { name: marker.label, country: "", latitude: marker.latitude, longitude: marker.longitude });
-            }}
+      <div className="street-map-tiles" aria-hidden="true">
+        {tiles.map((tile) => (
+          <img
+            key={tile.key}
+            className="street-map-tile"
+            src={tile.url}
+            alt=""
+            draggable="false"
+            style={{ left: tile.left, top: tile.top }}
           />
         ))}
       </div>
-      <span className="flat-map-caption">NASA EQUIRECTANGULAR VIEW · DRAG TO PAN · WHEEL TO ZOOM</span>
+      <div className="street-map-grid" aria-hidden="true" />
+      {markers.map((marker) => (
+        <button
+          className={`street-map-marker ${marker.kind}`}
+          type="button"
+          key={marker.id}
+          style={{ left: marker.left, top: marker.top }}
+          title={marker.label}
+          aria-label={marker.label}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => {
+            if (marker.event) onSelectEvent(marker.event);
+            else if (marker.quake) onSelectEvent({
+              title: marker.label,
+              type: "Earthquake",
+              date: marker.quake.time ? new Date(marker.quake.time).toISOString() : null,
+              source: "USGS",
+              magnitude: marker.quake.magnitude,
+              latitude: marker.latitude,
+              longitude: marker.longitude
+            });
+            onSelect(marker.location || { name: marker.label, country: "", latitude: marker.latitude, longitude: marker.longitude });
+          }}
+        />
+      ))}
+      <div className="street-map-weather" aria-live="polite">
+        <span className="street-map-weather-icon">{weatherIcon(selectedWeather?.current?.weather_code)}</span>
+        <span>
+          <strong>{selectedWeather?.current?.temperature_2m ?? "--"}°C</strong>
+          <small>{WEATHER_DESCRIPTIONS[selectedWeather?.current?.weather_code] || "Weather loading"}</small>
+        </span>
+      </div>
+      <span className="street-map-caption">
+        STREET MAP · CLICK FOR LOCAL WEATHER · DRAG TO PAN · SCROLL TO ZOOM
+        <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap contributors</a>
+      </span>
     </div>
   );
 }
@@ -891,6 +1108,8 @@ export default function App() {
   const [floodForecast, setFloodForecast] = useState(null);
   const [floodLoading, setFloodLoading] = useState(false);
   const [floodError, setFloodError] = useState("");
+  const [floodAlerts, setFloodAlerts] = useState([]);
+  const [floodAlertsError, setFloodAlertsError] = useState("");
   const [imageryStatus, setImageryStatus] = useState({ loading: false, error: "", date: "" });
   const [eventCategory, setEventCategory] = useState("All categories");
   const [minimumMagnitude, setMinimumMagnitude] = useState("0");
@@ -984,15 +1203,17 @@ export default function App() {
       if (currentRequest !== requestId.current) return;
 
       const [healthResult, weatherResult, airResult, quakeResult, monitoringResult] = results;
+      const loadedWeather = weatherResult.status === "fulfilled" ? weatherResult.value : null;
+      const loadedAirQuality = airResult.status === "fulfilled" ? airResult.value : null;
       setConnectionStatus(healthResult.status === "fulfilled" ? "online" : "offline");
-      if (weatherResult.status === "fulfilled") {
-        setWeather(weatherResult.value);
+      if (loadedWeather) {
+        setWeather(loadedWeather);
       } else {
         setWeather(null);
         setWeatherError(weatherResult.reason.message);
       }
-      if (airResult.status === "fulfilled") {
-        setAirQuality(airResult.value);
+      if (loadedAirQuality) {
+        setAirQuality(loadedAirQuality);
       } else {
         setAirQuality(null);
         setAirQualityError(airResult.reason.message);
@@ -1023,10 +1244,12 @@ export default function App() {
         supportingDataLoaded.current = true;
       }
       setLastUpdated(new Date().toLocaleTimeString());
+      return { weather: loadedWeather, airQuality: loadedAirQuality };
     } catch (error) {
       if (currentRequest === requestId.current) {
         setWeatherError(`${error.message} Check that the backend is running.`);
       }
+      return { weather: null, airQuality: null };
     } finally {
       if (currentRequest === requestId.current) setDataLoading(false);
     }
@@ -1039,7 +1262,7 @@ export default function App() {
     setVerifiedAirQuality(null);
     setAiError("");
     setClimateAnomaly(null);
-    loadDashboard(location);
+    return loadDashboard(location);
   }, [loadDashboard]);
 
   async function searchLocations(event) {
@@ -1069,23 +1292,61 @@ export default function App() {
     event.preventDefault();
     if (!question.trim() || loading) return;
 
+    const submittedQuestion = question.trim();
     setLoading(true);
     setAnswer("");
     setVerifiedAirQuality(null);
     setAiSources([]);
     setAiError("");
-    setChatMessages((messages) => [...messages, { role: "user", content: question.trim() }]);
+    setChatMessages((messages) => [...messages, { role: "user", content: submittedQuestion }]);
 
     try {
+      const mention = findLocationMention(submittedQuestion, [
+        selectedLocation,
+        ...CITY_MARKERS,
+        ...globalConditions
+      ]);
+      let contextLocation = selectedLocation;
+      let contextWeather = weather;
+      let contextAirQuality = airQuality;
+      let contextClimateAnomaly = climateAnomaly;
+
+      if (mention && mention.toLocaleLowerCase() !== selectedLocation.name.toLocaleLowerCase()) {
+        const geocodeResponse = await fetch(
+          `${API}/api/geocode?q=${encodeURIComponent(mention)}`
+        );
+        const geocodeResult = await geocodeResponse.json();
+        if (!geocodeResponse.ok) {
+          throw new Error(geocodeResult.error || `Could not find ${mention}.`);
+        }
+        const result = geocodeResult.results?.[0];
+        if (result) {
+          contextLocation = {
+            name: result.name,
+            country: result.country || "",
+            latitude: result.latitude,
+            longitude: result.longitude
+          };
+          if (!sameLocation(contextLocation, selectedLocation)) {
+            const locationData = await selectLocation(contextLocation);
+            contextWeather = locationData?.weather || null;
+            contextAirQuality = locationData?.airQuality || null;
+            contextClimateAnomaly = null;
+          } else {
+            contextLocation = selectedLocation;
+          }
+        }
+      }
+
       const response = await fetch(`${API}/api/insight`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          question,
-          location: selectedLocation,
-          weather,
-          airQuality,
-          climateAnomaly,
+          question: submittedQuestion,
+          location: contextLocation,
+          weather: contextWeather,
+          airQuality: contextAirQuality,
+          climateAnomaly: contextClimateAnomaly,
           globalIndicators,
           environmentalEvents: environmentalEvents.slice(0, 12),
           conversation: chatMessages.slice(-8)
@@ -1161,18 +1422,34 @@ export default function App() {
         if (!cancelled) setEarthquakeError(error.message);
       }
     };
+    const loadFloodAlerts = async () => {
+      try {
+        const response = await fetch(`${API}/api/flood-alerts`);
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Verified flood alerts are unavailable.");
+        if (!cancelled) {
+          setFloodAlerts(result.alerts || []);
+          setFloodAlertsError("");
+        }
+      } catch (error) {
+        if (!cancelled) setFloodAlertsError(error.message);
+      }
+    };
 
     loadEvents();
     loadIndicators();
     loadEarthquakes();
+    loadFloodAlerts();
     const eventTimer = window.setInterval(loadEvents, 10 * 60 * 1000);
     const indicatorTimer = window.setInterval(loadIndicators, 6 * 60 * 60 * 1000);
     const earthquakeTimer = window.setInterval(loadEarthquakes, 5 * 60 * 1000);
+    const floodAlertTimer = window.setInterval(loadFloodAlerts, 5 * 60 * 1000);
     return () => {
       cancelled = true;
       window.clearInterval(eventTimer);
       window.clearInterval(indicatorTimer);
       window.clearInterval(earthquakeTimer);
+      window.clearInterval(floodAlertTimer);
     };
   }, []);
 
@@ -1263,12 +1540,20 @@ export default function App() {
     ["PM10", air.pm10, "μg/m³"],
     ["Ozone", air.ozone, "μg/m³"]
   ];
-  const forecastDays = weather?.daily?.time?.slice(0, 3).map((date, index) => ({
+  const forecastDays = (weather?.daily?.time || []).map((date, index) => ({
     date,
     high: weather.daily.temperature_2m_max?.[index],
     low: weather.daily.temperature_2m_min?.[index],
-    precipitation: weather.daily.precipitation_probability_max?.[index]
+    precipitation: weather.daily.precipitation_probability_max?.[index],
+    weatherCode: weather.daily.weather_code?.[index]
   })) || [];
+  const nextThreeDays = forecastDays.slice(0, 3);
+  const hourlyForecast = (weather?.hourly?.time || []).slice(0, 12).map((time, index) => ({
+    time: time.slice(11, 16),
+    temperature: weather.hourly.temperature?.[index],
+    rainChance: weather.hourly.rainChance?.[index],
+    weatherCode: weather.hourly.weatherCode?.[index]
+  }));
   const filteredEarthquakes = earthquakes.filter((quake) =>
     Number(quake.magnitude ?? 0) >= Number(minimumMagnitude)
   );
@@ -1285,6 +1570,18 @@ export default function App() {
     .filter((quake) => quake.distance <= 500)
     .sort((first, second) => first.distance - second.distance)
     .slice(0, 3);
+  const nearbyFloodAlerts = floodAlerts
+    .map((alert) => ({
+      ...alert,
+      distance: distanceKm(
+        selectedLocation.latitude,
+        selectedLocation.longitude,
+        alert.latitude,
+        alert.longitude
+      )
+    }))
+    .filter((alert) => alert.distance <= 500)
+    .sort((first, second) => first.distance - second.distance);
   const tickerEvents = [
     ...environmentalEvents.map((event) => ({
       id: `eonet-${event.id}`,
@@ -1318,6 +1615,7 @@ export default function App() {
     airQualityError,
     environmentalEventsError,
     earthquakeError,
+    floodAlertsError,
     indicatorsError
   ].filter(Boolean).length;
   const sourceStatus = connectionStatus !== "online"
@@ -1518,9 +1816,9 @@ export default function App() {
             <div className="panel-heading globe-heading">
               <div>
                 <p className="eyebrow">PLANETARY VIEW</p>
-                <h2>Earth observation <span className="globe-heading-note">· Current global model</span></h2>
+                <h2>Earth observation                 <span className="globe-heading-note">· Interactive global and street-level views</span></h2>
               </div>
-              <span className="pill"><span className="live-dot" /> INTERACTIVE 3D</span>
+              <span className="pill"><span className="live-dot" /> {viewMode === "3d" ? "INTERACTIVE 3D" : "STREET MAP"}</span>
             </div>
 
             <nav className="earth-tool-rail" aria-label="Climate map tools">
@@ -1571,6 +1869,7 @@ export default function App() {
 
             <EarthGlobe
               earthquakes={earthquakes}
+              floodAlerts={floodAlerts}
               selectedLocation={selectedLocation}
               selectedWeather={weather}
               selectedAirQuality={airQuality}
@@ -1637,6 +1936,13 @@ export default function App() {
                 </span>
               ) : activeLayer === "Satellite / day-night" ? (
                 <span><i className="legend-green" /> NASA MODIS true-color imagery · shaded hemisphere indicates calculated night</span>
+              ) : activeLayer === "Flood risk" ? (
+                <span className="legend-scale">
+                  <span className="legend-entry"><i className="legend-red" />GDACS Red</span>
+                  <span className="legend-entry"><i className="legend-orange" />GDACS Orange</span>
+                  <span className="legend-entry"><i className="legend-green" />GDACS Green</span>
+                  <span>Official alert levels only · no inferred risk</span>
+                </span>
               ) : activeLayer === "Temperature" ? (
                 <span className="legend-scale">
                   <span className="legend-entry"><i className="legend-blue" />&lt;5°C</span>
@@ -1678,7 +1984,9 @@ export default function App() {
                     : activeLayer === "CO₂ & greenhouse gases"
                       ? "CO₂ has no point layer. The global indicator below uses NOAA monthly Mauna Loa observations, not a global station map."
                     : activeLayer === "Flood risk"
-                      ? "No validated global flood-risk surface is configured. No global flood-risk score is inferred."
+                      ? floodAlertsError
+                        ? `GDACS flood alerts are unavailable: ${floodAlertsError}. No risk level is inferred.`
+                        : `${floodAlerts.length} current flood event${floodAlerts.length === 1 ? "" : "s"} from the GDACS 24-hour feed. Markers show reported event locations and official GDACS alert levels, not flood boundaries.`
                     : activeLayer === "Climate risk zones"
                       ? "No validated global climate-risk zone dataset is connected. No risk zones are inferred or drawn."
                     : activeLayer === "Wildfires"
@@ -1771,10 +2079,60 @@ export default function App() {
                 </p>
               )}
             </div>
-            {forecastDays.length > 0 && (
+            <section className="flood-alerts" aria-live="polite">
+              <p className="eyebrow">VERIFIED FLOOD ALERTS · WITHIN 500 KM</p>
+              {floodAlertsError ? (
+                <p className="nearby-empty">{floodAlertsError} Alert status is unavailable; no risk is inferred.</p>
+              ) : nearbyFloodAlerts.some((alert) => alert.alertLevel === "Red" || alert.alertLevel === "Orange") ? (
+                nearbyFloodAlerts
+                  .filter((alert) => alert.alertLevel === "Red" || alert.alertLevel === "Orange")
+                  .map((alert) => (
+                    <a
+                      className={`flood-alert-row ${alert.alertLevel.toLowerCase()}`}
+                      key={alert.id}
+                      href={alert.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`Open GDACS report · ${Math.round(alert.distance)} km away`}
+                    >
+                      <span className="flood-alert-level">{alert.alertLevel}</span>
+                      <span>{alert.title}<small>{Math.round(alert.distance)} km · GDACS active flood event</small></span>
+                      <span aria-hidden="true">↗</span>
+                    </a>
+                  ))
+              ) : (
+                <p className="nearby-empty">
+                  {nearbyFloodAlerts.length
+                    ? "No active GDACS Orange/Red flood alerts within 500 km. Nearby events, if any, are Green level."
+                    : "No active GDACS Orange/Red flood alerts within 500 km."}
+                  {` ${floodAlerts.length} current flood event${floodAlerts.length === 1 ? "" : "s"} in the global GDACS 24-hour feed.`}
+                </p>
+              )}
+              <p className="source-note">
+                Source: <a href="https://www.gdacs.org/" target="_blank" rel="noreferrer">GDACS</a> · checked every 5 minutes. Alert levels are GDACS classifications, not a local flood-depth prediction.
+              </p>
+            </section>
+            {hourlyForecast.length > 0 && (
+              <section className="hourly-forecast" aria-label="Hourly weather forecast">
+                <p className="eyebrow">HOURLY FORECAST · {weather?.timezone || "LOCAL TIME"}</p>
+                <div className="hourly-forecast-list">
+                  {hourlyForecast.map((hour, index) => (
+                    <div className="hourly-forecast-item" key={`${hour.time}-${index}`}>
+                      <time>{hour.time}</time>
+                      <span className="hourly-weather-icon" aria-label={WEATHER_DESCRIPTIONS[hour.weatherCode] || "Weather unavailable"}>
+                        {weatherIcon(hour.weatherCode)}
+                      </span>
+                      <strong>{hour.temperature == null ? "--" : `${hour.temperature}°`}</strong>
+                      <small>🌧 {hour.rainChance == null ? "--" : `${hour.rainChance}%`}</small>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+            {nextThreeDays.length > 0 && (
               <div className="forecast-block">
-                <p className="eyebrow">OPEN-METEO FORECAST · NOT OBSERVATIONS</p>
-                {forecastDays.map((day) => (
+                <p className="eyebrow">NEXT 3 DAYS · OPEN-METEO FORECAST</p>
+                {nextThreeDays.map((day) => (
                   <div className="weather-detail forecast-detail" key={day.date}>
                     <span>{new Date(`${day.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "short" })} · {day.low ?? "--"}° / {day.high ?? "--"}°C</span>
                     <strong>{day.precipitation == null ? "--" : `${day.precipitation}% rain`}</strong>
@@ -1953,6 +2311,60 @@ export default function App() {
               <span key={`${forecastPeriod}-${index}`}>{Number.isFinite(value) ? value : "—"}{forecastVariable === "temperature" ? " °C" : "%"}</span>
             ))}
           </div>
+          {hourlyForecast.length > 0 && (
+            <section className="hourly-forecast forecast-hourly" aria-label="Next 12 hours weather forecast">
+              <p className="eyebrow">NEXT 12 HOURS · LOCAL TIME · {selectedLocation.name}</p>
+              <div className="hourly-forecast-list">
+                {hourlyForecast.map((hour, index) => (
+                  <div className="hourly-forecast-item" key={`${hour.time}-${index}`}>
+                    <time>{hour.time}</time>
+                    <span
+                      className="hourly-weather-icon"
+                      role="img"
+                      aria-label={WEATHER_DESCRIPTIONS[hour.weatherCode] || "Weather unavailable"}
+                      title={WEATHER_DESCRIPTIONS[hour.weatherCode] || "Weather unavailable"}
+                    >
+                      {weatherIcon(hour.weatherCode)}
+                    </span>
+                    <strong>{hour.temperature == null ? "--" : `${hour.temperature}°`}</strong>
+                    <small>🌧 {hour.rainChance == null ? "--" : `${hour.rainChance}%`}</small>
+                  </div>
+                ))}
+              </div>
+              <p className="source-note">Hourly forecast from {weather?.source || "Open-Meteo"} · forecast values, not live observations.</p>
+            </section>
+          )}
+          {nextThreeDays.length > 0 && (
+            <section className="three-day-forecast" aria-label="Next three days weather forecast">
+              <p className="eyebrow">NEXT 3 DAYS · {selectedLocation.name} · LOCAL FORECAST</p>
+              <div className="three-day-forecast-list">
+                {nextThreeDays.map((day, index) => (
+                  <article className="three-day-forecast-card" key={day.date}>
+                    <span className="three-day-name">
+                      {index === 0
+                        ? "Today"
+                        : new Date(`${day.date}T12:00:00`).toLocaleDateString(undefined, { weekday: "long" })}
+                    </span>
+                    <span
+                      className="three-day-weather-icon"
+                      role="img"
+                      aria-label={WEATHER_DESCRIPTIONS[day.weatherCode] || "Weather unavailable"}
+                      title={WEATHER_DESCRIPTIONS[day.weatherCode] || "Weather unavailable"}
+                    >
+                      {weatherIcon(day.weatherCode)}
+                    </span>
+                    <span className="three-day-condition">
+                      {WEATHER_DESCRIPTIONS[day.weatherCode] || "Conditions unavailable"}
+                    </span>
+                    <strong>{day.high == null ? "--" : `${day.high}°`} <small>/ {day.low == null ? "--" : `${day.low}°`}C</small></strong>
+                    <span className="three-day-rain">🌧 Rain chance {day.precipitation == null ? "--" : `${day.precipitation}%`}</span>
+                    <time>{new Date(`${day.date}T12:00:00`).toLocaleDateString()}</time>
+                  </article>
+                ))}
+              </div>
+              <p className="source-note">Daily forecast from {weather?.source || "Open-Meteo"} · model prediction, not a long-term climate outlook.</p>
+            </section>
+          )}
         </section>
 
         <section className="saved-panel panel" id="saved-panel" aria-labelledby="saved-title">
@@ -2226,7 +2638,7 @@ export default function App() {
         <div className="planet-controls" role="toolbar" aria-label="Globe and map controls">
           <div className="view-mode-group" aria-label="View mode">
             <button type="button" className={viewMode === "3d" ? "selected" : ""} aria-pressed={viewMode === "3d"} onClick={() => setViewMode("3d")}>3D GLOBE</button>
-            <button type="button" className={viewMode === "2d" ? "selected" : ""} aria-pressed={viewMode === "2d"} onClick={() => setViewMode("2d")}>2D MAP</button>
+            <button type="button" className={viewMode === "2d" ? "selected" : ""} aria-pressed={viewMode === "2d"} onClick={() => setViewMode("2d")}>STREET MAP</button>
             <button type="button" className={activeLayer === "Climate anomalies" ? "selected" : ""} aria-pressed={activeLayer === "Climate anomalies"} onClick={() => {
               setViewMode("3d");
               setActiveLayer("Climate anomalies");
